@@ -1,0 +1,1168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>用光点亮大脑</title>
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/700.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-serif-sc/900.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-sans-sc/400.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-sans-sc/500.css">
+<link rel="stylesheet" href="node_modules/@fontsource/noto-sans-sc/700.css">
+<link rel="stylesheet" href="node_modules/@fontsource/inter/400.css">
+<link rel="stylesheet" href="node_modules/@fontsource/inter/600.css">
+<style>
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; width: 100vw; height: auto; }
+</style>
+<script src="timeline.js"></script>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+"use strict";
+const W = 1920, H = 1080;
+const cv = document.getElementById("c");
+const X = cv.getContext("2d");
+const TL = window.TIMELINE;
+
+// ---------- palette ----------
+const COL = {
+  bg: "#03050c", blue: "#3ea6ff", cyan: "#6fe7ff", gold: "#e9c47e", goldHi: "#ffe3a6",
+  amber: "#ffb53d", green: "#73e09a", algae: "#4fbf6a", red: "#ff5b5b", white: "#f4f7ff",
+  dim: "rgba(220,230,255,0.62)", violet: "#a87bff", ion: "#ff9a3d", lipid: "#8fa3c8",
+};
+const SERIF = '"Noto Serif SC", serif', SANS = '"Noto Sans SC", sans-serif', LAT = 'Inter, "Noto Sans SC", sans-serif';
+
+// ---------- math ----------
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const eo = k => 1 - Math.pow(1 - k, 3);
+const eio = k => k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const eback = k => { const c = 1.6; return 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2); };
+const fio = (t, a, b, fi = .6, fo = .6) => Math.min(seg(t, a, a + fi), 1 - seg(t, b - fo, b));
+const TAU = Math.PI * 2;
+function rng(seed) { let s = seed >>> 0 || 1; return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return ((s >>> 0) % 1e6) / 1e6; }; }
+const frac = v => v - Math.floor(v);
+const hash = n => frac(Math.sin(n * 127.1 + 311.7) * 43758.5453);
+
+// ---------- timeline helpers ----------
+const SC = {}; TL.scenes.forEach(s => SC[s.id] = s);
+const CUES = {}; TL.cues.forEach(c => (CUES[c.scene] = CUES[c.scene] || []).push(c));
+const cue = (id, i) => CUES[id][i].start - SC[id].start;
+const cueEnd = (id, i) => CUES[id][i].end - SC[id].start;
+
+// ---------- images ----------
+const IMG = {};
+const IMG_LIST = ["hegemann.jpg", "nagel.png", "deisseroth.jpg", "chlamy_lm.jpg", "chlamy_tem.jpg", "brainbow.jpg", "gfp_neurons.png", "opto_rig.jpg", "pyramidal.jpg"];
+function loadImages() {
+  return Promise.all(IMG_LIST.map(f => new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => { IMG[f.split(".")[0]] = im; res(); }; im.onerror = rej; im.src = "../assets/img/" + f;
+  })));
+}
+
+// ---------- drawing helpers ----------
+function txt(s, x, y, o = {}) {
+  X.save();
+  X.globalAlpha *= (o.a ?? 1);
+  X.font = `${o.w || 500} ${o.size || 40}px ${o.f || SANS}`;
+  X.textAlign = o.align || "center"; X.textBaseline = o.base || "middle";
+  if (o.ls) X.letterSpacing = o.ls + "px";
+  if (o.glow) { X.shadowColor = o.glow; X.shadowBlur = o.blur || 30; }
+  if (o.stroke) { X.lineWidth = o.stroke; X.strokeStyle = o.strokeColor || "rgba(0,0,0,.6)"; X.strokeText(s, x, y); }
+  X.fillStyle = o.c || COL.white; X.fillText(s, x, y);
+  if (o.glow && o.double) X.fillText(s, x, y);
+  X.restore();
+}
+function glowDot(x, y, r, color, a = 1) {
+  if (a <= 0.003 || r <= 0) return;
+  X.save(); X.globalAlpha *= a; X.globalCompositeOperation = "lighter";
+  const g = X.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, color); g.addColorStop(.25, color.replace(/[\d.]+\)$/, m => (parseFloat(m) * .45) + ")")); g.addColorStop(1, "rgba(0,0,0,0)");
+  X.fillStyle = g; X.beginPath(); X.arc(x, y, r, 0, TAU); X.fill(); X.restore();
+}
+function rgba(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+function imgCover(im, x, y, w, h, o = {}) {
+  const z = o.zoom || 1, ar = im.width / im.height, br = w / h;
+  let sw, sh; if (ar > br) { sh = im.height / z; sw = sh * br; } else { sw = im.width / z; sh = sw / br; }
+  const sx = (im.width - sw) * (o.px ?? .5), sy = (im.height - sh) * (o.py ?? .5);
+  X.save(); X.globalAlpha *= (o.a ?? 1); if (o.filter) X.filter = o.filter;
+  X.drawImage(im, sx, sy, sw, sh, x, y, w, h); X.restore();
+}
+function roundRect(x, y, w, h, r) { X.beginPath(); X.roundRect(x, y, w, h, r); }
+function vignette(strength = .75) {
+  const g = X.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, H * 1.0);
+  g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, `rgba(0,0,0,${strength})`);
+  X.fillStyle = g; X.fillRect(0, 0, W, H);
+}
+function bg(c1 = "#060a18", c2 = COL.bg) {
+  const g = X.createLinearGradient(0, 0, 0, H); g.addColorStop(0, c1); g.addColorStop(1, c2);
+  X.fillStyle = g; X.fillRect(0, 0, W, H);
+}
+// dust particles drifting (deterministic)
+function dust(t, n = 90, color = "rgba(140,190,255,0.5)", seed = 7) {
+  const r = rng(seed);
+  for (let i = 0; i < n; i++) {
+    const x0 = r() * W, y0 = r() * H, sp = 6 + r() * 18, ph = r() * TAU, sz = .6 + r() * 2.2;
+    const x = (x0 + t * sp * .6 + W) % W, y = (y0 - t * sp + H * 10) % H;
+    const tw = .35 + .65 * Math.abs(Math.sin(t * .8 + ph));
+    X.fillStyle = color.replace(/[\d.]+\)$/, (tw * parseFloat(color.match(/[\d.]+\)$/)[0])) + ")");
+    X.beginPath(); X.arc(x, y, sz, 0, TAU); X.fill();
+  }
+}
+function chapter(t, num, title, dur) {
+  const a = fio(t, .3, dur - .2, .8, .6);
+  X.save(); X.globalAlpha = a * .85;
+  txt(num, 96, 82, { f: LAT, w: 600, size: 22, c: COL.cyan, align: "left", ls: 4 });
+  X.fillStyle = rgba(COL.cyan, .7); X.fillRect(140, 81, 40 * eo(seg(t, .3, 1.3)), 2);
+  txt(title, 196, 82, { w: 500, size: 24, c: "rgba(230,240,255,.9)", align: "left", ls: 3 });
+  X.restore();
+}
+function credit(s, a = 1, x = W - 60, y = H - 34) {
+  txt(s, x, y, { f: LAT, w: 400, size: 15, c: "rgba(200,210,235,.55)", align: "right", a });
+}
+function label(s, x, y, o = {}) {
+  const a = o.a ?? 1; if (a <= 0) return;
+  X.save(); X.globalAlpha *= a;
+  X.font = `${o.w || 500} ${o.size || 30}px ${o.f || SANS}`;
+  const tw = X.measureText(s).width, pad = o.pad || 18, h = (o.size || 30) * 1.7;
+  const bx = (o.align === "left" ? x : o.align === "right" ? x - tw - pad * 2 : x - tw / 2 - pad);
+  roundRect(bx, y - h / 2, tw + pad * 2, h, h / 2);
+  X.fillStyle = o.bg || "rgba(8,16,36,.72)"; X.fill();
+  X.strokeStyle = o.border || rgba(COL.cyan, .45); X.lineWidth = 1.5; X.stroke();
+  X.restore();
+  txt(s, bx + pad + tw / 2, y + 1, { ...o, align: "center", a });
+}
+// photon wiggle
+function photon(x1, y1, x2, y2, k, color = COL.blue, amp = 10, waves = 7) {
+  const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy), ux = dx / L, uy = dy / L;
+  const head = k * L, tail = Math.max(0, head - 220);
+  X.save(); X.globalCompositeOperation = "lighter"; X.lineCap = "round";
+  for (const [lw, al] of [[10, .18], [5, .4], [2.4, 1]]) {
+    X.strokeStyle = rgba(color, al); X.lineWidth = lw; X.beginPath();
+    for (let s = tail; s <= head; s += 4) {
+      const w = Math.sin(s / L * waves * TAU) * amp;
+      const px = x1 + ux * s - uy * w, py = y1 + uy * s + ux * w;
+      s === tail ? X.moveTo(px, py) : X.lineTo(px, py);
+    }
+    X.stroke();
+  }
+  X.restore();
+  glowDot(x1 + ux * head, y1 + uy * head, 40, rgba(color, .9), k > 0 && k < 1 ? 1 : 0);
+}
+
+// ---------- procedural neuron (cached path) ----------
+function makeNeuron(seed, scale = 1) {
+  const r = rng(seed), branches = [];
+  function grow(x, y, ang, len, w, depth) {
+    const pts = [[x, y]]; let cx = x, cy = y, a = ang;
+    const steps = Math.max(3, Math.floor(len / 14));
+    for (let i = 0; i < steps; i++) { a += (r() - .5) * .5; cx += Math.cos(a) * len / steps; cy += Math.sin(a) * len / steps; pts.push([cx, cy]); }
+    branches.push({ pts, w, depth });
+    if (depth < 3) { const n = 1 + (r() < .7 ? 1 : 0); for (let k = 0; k < n; k++) grow(cx, cy, a + (r() - .5) * 1.4, len * (.55 + r() * .25), w * .62, depth + 1); }
+  }
+  const nd = 6;
+  for (let i = 0; i < nd; i++) grow(0, 0, -Math.PI / 2 + (i - (nd - 1) / 2) * .55 + (r() - .5) * .3, (150 + r() * 80) * scale, 9 * scale, 0);
+  // axon
+  const ax = []; let ax0 = 0, ay0 = 30 * scale, aa = Math.PI / 2 + .2;
+  for (let i = 0; i < 60; i++) { aa += Math.sin(i * .35) * .05; ax0 += Math.cos(aa) * 9 * scale; ay0 += Math.sin(aa) * 9 * scale; ax.push([ax0, ay0]); }
+  return { branches, axon: ax };
+}
+function drawNeuron(N, x, y, o = {}) {
+  const col = o.color || COL.cyan, glow = o.glow ?? .5, a = o.a ?? 1;
+  X.save(); X.translate(x, y); X.rotate(o.rot || 0); X.globalAlpha *= a; X.lineCap = "round"; X.lineJoin = "round";
+  if (glow > 0) { X.shadowColor = col; X.shadowBlur = 18 + 30 * glow; }
+  X.strokeStyle = col;
+  for (const b of N.branches) {
+    X.lineWidth = Math.max(1, b.w); X.beginPath(); b.pts.forEach((p, i) => i ? X.lineTo(p[0], p[1]) : X.moveTo(p[0], p[1])); X.stroke();
+  }
+  X.lineWidth = 4; X.beginPath(); X.moveTo(0, 20); N.axon.forEach(p => X.lineTo(p[0], p[1])); X.stroke();
+  X.fillStyle = col; X.beginPath(); X.ellipse(0, 0, 34, 30, 0, 0, TAU); X.fill();
+  X.restore();
+}
+
+// ---------- shared network (scene 1, 10) ----------
+const NET = (() => {
+  const r = rng(42), nodes = [], edges = [];
+  for (let i = 0; i < 170; i++) nodes.push({ x: (r() - .5) * 2600, y: (r() - .5) * 1500, z: r(), ph: r() * TAU, cl: 0 });
+  nodes.forEach((n, i) => {
+    const d = nodes.map((m, j) => [Math.hypot(m.x - n.x, m.y - n.y), j]).sort((a, b) => a[0] - b[0]);
+    for (let k = 1; k <= 3; k++) if (d[k][0] < 330) edges.push([i, d[k][1]]);
+  });
+  // cluster: nodes near (380,-120)
+  nodes.forEach(n => n.cl = Math.hypot(n.x - 380, n.y + 120) < 230 ? 1 : 0);
+  return { nodes, edges };
+})();
+function drawNet(t, o = {}) {
+  const cam = o.cam || { x: 0, y: 0, z: 1 }, base = o.base ?? .35, beamX = o.beamX ?? -1e9;
+  const P = n => { const par = .6 + n.z * .6; return [W / 2 + (n.x - cam.x * par) * cam.z, H / 2 + (n.y - cam.y * par) * cam.z]; };
+  const lit = n => { const [px] = P(n); const b = clamp(1 - Math.abs(px - beamX) / 260); return b; };
+  X.save(); X.globalCompositeOperation = "lighter";
+  for (const [i, j] of NET.edges) {
+    const a = NET.nodes[i], b = NET.nodes[j], [x1, y1] = P(a), [x2, y2] = P(b);
+    const al = (base * .35 + .4 * Math.max(lit(a), lit(b))) * (o.a ?? 1);
+    X.strokeStyle = `rgba(90,170,255,${al})`; X.lineWidth = 1.1 * cam.z; X.beginPath(); X.moveTo(x1, y1); X.lineTo(x2, y2); X.stroke();
+    // traveling spike
+    if (o.spikes) {
+      const e = (i * 31 + j * 17) % 97, per = 2.6 + (e % 7) * .45, k = frac(t / per + e * .113);
+      if (hash(e + Math.floor(t / per + e * .113)) < o.spikes) {
+        const sx = lerp(x1, x2, k), sy = lerp(y1, y2, k);
+        glowDot(sx, sy, 14 * cam.z, "rgba(140,220,255,0.9)", (o.a ?? 1) * Math.sin(k * Math.PI));
+      }
+    }
+  }
+  for (const n of NET.nodes) {
+    const [x, y] = P(n), tw = .55 + .45 * Math.sin(t * 1.3 + n.ph);
+    let b = base * tw + lit(n) * 1.2, col = "rgba(120,200,255,1)";
+    if (o.cluster && n.cl) { b = Math.max(b, o.cluster * (.8 + .2 * Math.sin(t * 6 + n.ph))); col = "rgba(90,160,255,1)"; }
+    if (o.dimOthers && !n.cl) b *= 1 - o.dimOthers * .75;
+    const r = (3 + n.z * 3) * cam.z;
+    glowDot(x, y, r * 7, col.replace(",1)", `,${.55 * clamp(b)})`), o.a ?? 1);
+    X.fillStyle = `rgba(220,240,255,${clamp(b) * (o.a ?? 1)})`; X.beginPath(); X.arc(x, y, r * .7, 0, TAU); X.fill();
+  }
+  X.restore();
+}
+
+// ================= SCENES =================
+const SCENES = {};
+
+// S01 — opening
+SCENES.s01 = (t, d) => {
+  bg("#02040b", "#000");
+  const camx = t * 14, camz = 1.02 + t * .006;
+  // gfp photo interlude
+  const pa = fio(t, 7.0, 13.6, 1.4, 1.4);
+  if (pa > 0) {
+    imgCover(IMG.gfp_neurons, 0, 0, W, H, { zoom: 1.08 + (t - 7) * .018, px: .4 + (t - 7) * .01, py: .5, a: pa * .85, filter: "saturate(1.2) brightness(1.05)" });
+    X.fillStyle = `rgba(0,0,0,${pa * .25})`; X.fillRect(0, 0, W, H);
+  }
+  const beamX = lerp(-300, W + 300, eio(seg(t, .4, 3.6)));
+  const netA = 1 - pa * .85;
+  const clusterK = eo(seg(t, 15.0, 16.5));
+  drawNet(t, { cam: { x: camx, y: 0, z: camz }, base: .18 + .25 * seg(t, 1.5, 4), beamX, spikes: .35 * seg(t, 3, 5), a: netA, cluster: clusterK, dimOthers: clusterK });
+  // beam
+  if (t < 4.2) {
+    const g = X.createLinearGradient(beamX - 260, 0, beamX + 260, 0);
+    g.addColorStop(0, "rgba(60,150,255,0)"); g.addColorStop(.5, "rgba(80,170,255,0.33)"); g.addColorStop(1, "rgba(60,150,255,0)");
+    X.save(); X.globalCompositeOperation = "lighter"; X.fillStyle = g; X.fillRect(beamX - 260, 0, 520, H); X.restore();
+  }
+  // title
+  const ta = fio(t, 2.4, 7.4, 1.2, .9);
+  if (ta > 0) {
+    const s = 1 + .03 * seg(t, 2.4, 7.4);
+    X.save(); X.translate(W / 2, H / 2 - 30); X.scale(s, s);
+    txt("用光，点亮大脑", 0, 0, { f: SERIF, w: 900, size: 132, c: COL.white, glow: "rgba(80,170,255,.95)", blur: 50, a: ta, ls: 14, double: true });
+    X.restore();
+    X.fillStyle = rgba(COL.gold, ta * .8); X.fillRect(W / 2 - 160 * eo(seg(t, 3, 4.4)), H / 2 + 62, 320 * eo(seg(t, 3, 4.4)), 2);
+    txt("2026 诺贝尔生理学或医学奖 · 光遗传学", W / 2, H / 2 + 112, { w: 500, size: 38, c: COL.goldHi, a: ta * seg(t, 3.2, 4.4), ls: 6 });
+  }
+  if (pa > 0) label("真实的神经元网络 · 荧光显微图像", W / 2, 150, { size: 26, a: pa * seg(t, 8, 9) });
+  if (pa > 0) credit("Image: ManuelSchottdorf / Wikimedia Commons, CC BY-SA 4.0", pa);
+  // counter
+  const ca = fio(t, 3.4, 7.2, .6, .6) * 0;
+  // question ring
+  if (clusterK > 0) {
+    const cx = W / 2 + (380 - camx * (.6 + .5 * .6)) * camz, cy = H / 2 - 120 * camz;
+    X.save(); X.strokeStyle = rgba(COL.cyan, clusterK * .9); X.lineWidth = 2.5; X.setLineDash([10, 10]); X.lineDashOffset = -t * 30;
+    X.beginPath(); X.arc(cx, cy, 250 + 8 * Math.sin(t * 3), 0, TAU); X.stroke(); X.restore();
+    txt("?", cx + 230, cy - 210, { f: SERIF, w: 900, size: 120, c: COL.cyan, glow: COL.blue, a: clusterK });
+  }
+  txt("860亿", W - 300, H - 230, { f: SERIF, w: 900, size: 110, c: COL.white, glow: "rgba(80,170,255,.7)", a: fio(t, 3.6, 7.0, .6, .6) * 0 });
+  vignette(.8);
+};
+
+// S02 — laureates
+const LAUREATES = [
+  { img: "hegemann", zh: "彼得·黑格曼", en: "Peter Hegemann", inst: "柏林洪堡大学", c: "德国", credit: "Millencolin, CC BY-SA 4.0" },
+  { img: "nagel", zh: "格奥尔格·纳格尔", en: "Georg Nagel", inst: "维尔茨堡大学", c: "德国", credit: "Millencolin, CC0" },
+  { img: "deisseroth", zh: "卡尔·戴瑟罗斯", en: "Karl Deisseroth", inst: "斯坦福大学 · HHMI", c: "美国", credit: "Cmichel67, CC BY-SA 4.0" },
+];
+function portraitCard(L, x, y, a, s = 1, o = {}) {
+  if (a <= 0) return;
+  const w = 380 * s, h = 470 * s;
+  X.save(); X.globalAlpha *= a; X.translate(x, y);
+  // glow frame
+  X.shadowColor = rgba(COL.gold, .5); X.shadowBlur = 40;
+  roundRect(-w / 2, -h / 2, w, h, 26 * s); X.fillStyle = "rgba(14,18,34,.92)"; X.fill(); X.shadowBlur = 0;
+  X.strokeStyle = rgba(COL.gold, .75); X.lineWidth = 2; X.stroke();
+  X.save(); roundRect(-w / 2 + 14 * s, -h / 2 + 14 * s, w - 28 * s, h * .62, 18 * s); X.clip();
+  const im = IMG[L.img]; imgCover(im, -w / 2 + 14 * s, -h / 2 + 14 * s, w - 28 * s, h * .62, { zoom: 1, py: L.img === "deisseroth" ? .22 : .35 });
+  X.restore();
+  txt(L.zh, 0, h * .24, { f: SERIF, w: 900, size: 40 * s, c: COL.white });
+  txt(L.en, 0, h * .32, { f: LAT, w: 600, size: 22 * s, c: COL.goldHi, ls: 1 });
+  txt(`${L.inst} · ${L.c}`, 0, h * .41, { w: 400, size: 21 * s, c: COL.dim });
+  X.restore();
+}
+SCENES.s02 = (t, d) => {
+  bg("#0a0a14", "#020205");
+  // golden halo rings
+  const ra = fio(t, 0, d, 1, .6);
+  X.save(); X.translate(W / 2, H / 2 - 20); X.globalCompositeOperation = "lighter";
+  for (let i = 0; i < 3; i++) {
+    X.strokeStyle = rgba(COL.gold, (.22 - i * .05) * ra); X.lineWidth = 2 - i * .4;
+    X.beginPath(); X.arc(0, 0, 330 + i * 70 + 10 * Math.sin(t * .8 + i), t * .2 * (i % 2 ? -1 : 1), t * .2 * (i % 2 ? -1 : 1) + TAU * .82); X.stroke();
+  }
+  X.restore();
+  dust(t, 120, "rgba(255,210,140,0.55)", 3);
+  // phase 1: announcement
+  const p1 = fio(t, .5, cue("s02", 1) + .2, .8, .6);
+  if (p1 > 0) {
+    txt("2026 · 10 · 05", W / 2, H / 2 - 150, { f: LAT, w: 600, size: 44, c: COL.goldHi, ls: 10, a: p1 });
+    txt("诺贝尔生理学或医学奖", W / 2, H / 2 - 20, { f: SERIF, w: 900, size: 104, c: COL.white, glow: rgba(COL.gold, .8), blur: 40, a: p1 * seg(t, 1.0, 2.0), ls: 8 });
+    txt("The Nobel Prize in Physiology or Medicine", W / 2, H / 2 + 90, { f: LAT, w: 400, size: 30, c: COL.dim, a: p1 * seg(t, 1.6, 2.6), ls: 3 });
+  }
+  // phase 2: cards
+  const c1 = cue("s02", 1), c2 = cue("s02", 2), c3 = cue("s02", 3);
+  const out = 1 - seg(t, c3 - .2, c3 + .5);
+  const xs = [W / 2 - 470, W / 2, W / 2 + 470];
+  [0, 1, 2].forEach(i => {
+    const st = i < 2 ? c1 + .3 + i * 1.6 : c2 + .1, k = eback(seg(t, st, st + .8));
+    portraitCard(LAUREATES[i], xs[i], H / 2 - 10 + (1 - k) * 80, seg(t, st, st + .5) * out, .95);
+  });
+  if (seg(t, c1, c1 + .5) * out > 0) credit("Photos: " + LAUREATES.map(l => l.credit).join(" · ") + " / Wikimedia Commons", seg(t, c1, c1 + .5) * out);
+  // phase 3: optogenetics word
+  const p3 = seg(t, c3, c3 + .9);
+  if (p3 > 0) {
+    const s = .9 + .1 * eo(p3);
+    X.save(); X.translate(W / 2, H / 2 - 40); X.scale(s, s);
+    txt("光遗传学", 0, 0, { f: SERIF, w: 900, size: 170, c: COL.white, glow: "rgba(70,160,255,1)", blur: 60, a: p3, ls: 24, double: true });
+    X.restore();
+    txt("OPTOGENETICS", W / 2, H / 2 + 90, { f: LAT, w: 600, size: 34, c: COL.cyan, ls: 22, a: seg(t, c3 + .4, c3 + 1.2) });
+    txt("“for their discoveries concerning light-gated ion channels and optogenetics”", W / 2, H / 2 + 170, { f: LAT, w: 400, size: 24, c: COL.dim, a: seg(t, c3 + .9, c3 + 1.8) });
+  }
+  vignette(.7);
+};
+
+// S03 — the problem
+SCENES.s03 = (t, d) => {
+  bg("#04060e", "#010205");
+  const c1 = cue("s03", 1), c2 = cue("s03", 2), c3 = cue("s03", 3);
+  const part1 = 1 - seg(t, c3 - .3, c3 + .3);
+  if (part1 > 0) {
+    // brainbow tissue background
+    imgCover(IMG.brainbow, 0, 0, W, H, { zoom: 1.15 + t * .01, a: .55 * part1, filter: "saturate(1.3) brightness(.85)" });
+    X.fillStyle = `rgba(0,0,0,${.35 * part1})`; X.fillRect(0, 0, W, H);
+    credit("Brainbow image: Stephen J Smith / Wikimedia Commons, CC BY 3.0", part1);
+    // neuron field dots
+    const r = rng(9), cx = W * .42, cy = H * .55;
+    const shock = seg(t, c1 + .4, c1 + 2.2), drug = seg(t, c2 + .2, c2 + 3.2);
+    const pal = ["#ff5f7a", "#ffd166", "#06d6a0", "#4cc9f0", "#c77dff", "#f8961e"];
+    for (let i = 0; i < 220; i++) {
+      const x = r() * W, y = 140 + r() * (H - 280), c = pal[i % 6], dd = Math.hypot(x - cx, y - cy);
+      const hit = shock > 0 && dd < shock * 900 ? Math.max(0, 1 - (shock * 900 - dd) / 500) + .25 * (1 - seg(t, c2, c2 + 1)) : 0;
+      const dx = W * .62, dy = H * .45, dd2 = Math.hypot(x - dx, y - dy), dg = drug > 0 && dd2 < 120 + drug * 620 ? .6 : 0;
+      const b = .25 + Math.max(hit, dg) * part1;
+      glowDot(x, y, 10 + 26 * Math.max(hit, dg), rgba(c, .9), b * part1);
+    }
+    // electrode
+    const ek = eo(seg(t, .9, 2.4));
+    if (ek > 0) {
+      const tipY = lerp(-60, cy, ek);
+      X.save(); X.globalAlpha = part1;
+      const g = X.createLinearGradient(cx - 14, 0, cx + 14, 0); g.addColorStop(0, "#5c6577"); g.addColorStop(.45, "#e8eef7"); g.addColorStop(1, "#4a5263");
+      X.fillStyle = g; X.beginPath(); X.moveTo(cx - 14, -10); X.lineTo(cx + 14, -10); X.lineTo(cx + 3, tipY - 6); X.lineTo(cx, tipY); X.lineTo(cx - 3, tipY - 6); X.closePath(); X.fill();
+      X.restore();
+      label("电极", cx + 70, cy - 280, { size: 28, a: part1 * seg(t, 1.5, 2.2) * (1 - seg(t, c2, c2 + .5)), align: "left" });
+    }
+    if (shock > 0 && shock < 1) {
+      X.save(); X.globalCompositeOperation = "lighter";
+      X.strokeStyle = `rgba(255,240,180,${(1 - shock) * .8})`; X.lineWidth = 6; X.beginPath(); X.arc(cx, cy, shock * 900, 0, TAU); X.stroke();
+      // lightning bolts
+      const br = rng(Math.floor(t * 12));
+      for (let k = 0; k < 7; k++) {
+        X.strokeStyle = `rgba(255,250,220,${(1 - shock) * .9})`; X.lineWidth = 2.5; X.beginPath(); X.moveTo(cx, cy);
+        let a = br() * TAU, px = cx, py = cy; for (let s = 0; s < 8; s++) { a += (br() - .5) * .9; px += Math.cos(a) * 40; py += Math.sin(a) * 40; X.lineTo(px, py); }
+        X.stroke();
+      }
+      X.restore();
+    }
+    if (drug > 0) {
+      const dx = W * .62, dy = H * .45, R = 120 + drug * 620;
+      const g = X.createRadialGradient(dx, dy, 0, dx, dy, R);
+      g.addColorStop(0, `rgba(170,110,255,${.45 * part1})`); g.addColorStop(.7, `rgba(140,80,255,${.22 * part1})`); g.addColorStop(1, "rgba(120,60,255,0)");
+      X.fillStyle = g; X.beginPath(); X.arc(dx, dy, R, 0, TAU); X.fill();
+      // pill
+      X.save(); X.globalAlpha = part1 * seg(t, c2, c2 + .4); X.translate(dx, dy); X.rotate(-.5);
+      roundRect(-50, -22, 100, 44, 22); X.fillStyle = "#fff"; X.fill(); X.fillStyle = COL.violet; X.fillRect(0, -22, 50, 44);
+      X.beginPath(); X.roundRect(0, -22, 50, 44, [0, 22, 22, 0]); X.fill(); X.restore();
+      label("药物", dx + 90, dy - 70, { size: 28, a: part1 * seg(t, c2 + .3, c2 + .9), align: "left", border: rgba(COL.violet, .6) });
+    }
+    label("一放电，周围的细胞全被激活", W * .27, H - 150, { size: 30, a: part1 * fio(t, c1 + .6, c2 + .2, .5, .4) });
+    label("一扩散，影响一大片区域", W * .7, H - 150, { size: 30, a: part1 * fio(t, c2 + .8, c3 - .2, .5, .4), border: rgba(COL.violet, .6) });
+  }
+  // part 2: orchestra analogy
+  const p2 = seg(t, c3 - .1, c3 + .7);
+  if (p2 > 0) {
+    const cx = W / 2, cy = H * .86;
+    const vol = .5 + .5 * Math.sin((t - c3) * 2.2);
+    const masterOn = seg(t, cue("s03", 4), cue("s03", 4) + .4);
+    let idx = 0;
+    for (let row = 0; row < 5; row++) {
+      const R = 300 + row * 115, n = 9 + row * 4;
+      for (let k = 0; k < n; k++) {
+        const a = Math.PI + (k + .5) / n * Math.PI, x = cx + Math.cos(a) * R, y = cy + Math.sin(a) * R * .78;
+        const target = row === 1 && k === 3;
+        const lvl = masterOn > 0 ? lerp(.35, .35 + .65 * vol, masterOn) : .35 + .25 * Math.sin(t * 3 + idx);
+        const h = 16 + 70 * lvl;
+        X.save(); X.globalAlpha = p2;
+        X.fillStyle = target ? COL.amber : "rgba(120,170,255,.75)";
+        if (target) { X.shadowColor = COL.amber; X.shadowBlur = 25; }
+        roundRect(x - 7, y - h, 14, h, 7); X.fill(); X.restore();
+        X.fillStyle = rgba(target ? COL.amber : "#7ea8ff", p2 * .9); X.beginPath(); X.arc(x, y + 14, 9, 0, TAU); X.fill();
+        if (target) {
+          X.save(); X.strokeStyle = rgba(COL.amber, p2 * (.6 + .4 * Math.sin(t * 5))); X.lineWidth = 3; X.beginPath(); X.arc(x, y - 30, 70, 0, TAU); X.stroke(); X.restore();
+          label("🎻 想听清的那一把小提琴", x - 40, y - 140, { size: 26, a: p2 * seg(t, c3 + .8, c3 + 1.4), border: rgba(COL.amber, .6), align: "right" });
+        }
+        idx++;
+      }
+    }
+    // master fader
+    if (masterOn > 0) {
+      const fx = W - 230, fy = 260, fh = 460;
+      X.save(); X.globalAlpha = p2 * masterOn;
+      roundRect(fx - 6, fy, 12, fh, 6); X.fillStyle = "rgba(255,255,255,.15)"; X.fill();
+      const ky = fy + fh - vol * fh;
+      roundRect(fx - 50, ky - 22, 100, 44, 10); X.fillStyle = "#dfe7f5"; X.fill();
+      X.restore();
+      txt("整个乐团的音量", fx, fy - 40, { size: 26, c: COL.dim, a: p2 * masterOn });
+    }
+    txt("就像只能一起调大调小", W / 2, 170, { f: SERIF, w: 700, size: 52, c: COL.white, a: p2 * masterOn, glow: "rgba(80,140,255,.6)" });
+  }
+  chapter(t, "01", "过去的难题", d);
+  vignette(.65);
+};
+
+// S04 — algae
+function drawAlga(x, y, ang, s, t, o = {}) {
+  X.save(); X.translate(x, y); X.rotate(ang); X.scale(s, s); X.globalAlpha *= (o.a ?? 1);
+  // flagella (front = -x direction)
+  X.strokeStyle = "rgba(190,255,200,.85)"; X.lineWidth = 3.5; X.lineCap = "round";
+  for (const side of [-1, 1]) {
+    X.beginPath(); X.moveTo(-88, side * 10);
+    for (let i = 1; i <= 26; i++) {
+      const u = i / 26, beat = Math.sin(t * 9 - u * 5) * 26 * u;
+      X.lineTo(-88 - u * 170 * .6 + Math.abs(beat) * .2, side * (10 + u * 120 * (.4 + .6 * (.5 + .5 * Math.sin(t * 9))) ) + beat * .4);
+    }
+    X.stroke();
+  }
+  // cell body
+  const g = X.createRadialGradient(-20, -20, 10, 0, 0, 110);
+  g.addColorStop(0, "#b8ffc4"); g.addColorStop(.5, "#3faf5c"); g.addColorStop(1, "#13542a");
+  X.shadowColor = "rgba(90,255,140,.6)"; X.shadowBlur = 40; X.fillStyle = g;
+  X.beginPath(); X.ellipse(0, 0, 100, 76, 0, 0, TAU); X.fill(); X.shadowBlur = 0;
+  // chloroplast cup texture
+  X.strokeStyle = "rgba(20,80,40,.45)"; X.lineWidth = 2;
+  for (let i = 0; i < 6; i++) { X.beginPath(); X.ellipse(15, 0, 70 - i * 9, 55 - i * 7, 0, -1.2, 1.2); X.stroke(); }
+  // nucleus
+  X.fillStyle = "rgba(220,255,225,.55)"; X.beginPath(); X.arc(-30, 0, 20, 0, TAU); X.fill();
+  // eyespot
+  const eg = X.createRadialGradient(-35, -60, 0, -35, -60, 18);
+  eg.addColorStop(0, "#ffcf6b"); eg.addColorStop(.6, "#ff5a2e"); eg.addColorStop(1, "rgba(255,60,30,0)");
+  X.fillStyle = eg; X.beginPath(); X.ellipse(-35, -58, 18, 10, -.3, 0, TAU); X.fill();
+  X.restore();
+}
+SCENES.s04 = (t, d) => {
+  const c1 = cue("s04", 1), c2 = cue("s04", 2), c3 = cue("s04", 3), c4 = cue("s04", 4);
+  bg("#021410", "#010806");
+  // pond caustics
+  const pa = 1 - seg(t, c2 + .2, c2 + 1);
+  if (pa > 0) {
+    X.save(); X.globalAlpha = pa; X.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 28; i++) {
+      X.strokeStyle = `rgba(110,230,190,${.05 + .04 * Math.sin(i)})`; X.lineWidth = 2 + (i % 3);
+      X.beginPath();
+      for (let x = 0; x <= W; x += 20) { const y = i * 42 + 20 * Math.sin(x * .006 + t * .8 + i) + 14 * Math.sin(x * .013 - t * 1.1 + i * 2); x ? X.lineTo(x, y) : X.moveTo(x, y); }
+      X.stroke();
+    }
+    X.restore();
+    dust(t, 110, "rgba(160,255,200,0.55)", 11);
+    // microscope view
+    const ma = seg(t, c1 - .4, c1 + .6), R = 360 * eo(ma);
+    if (R > 1) {
+      const cx = W * .5, cy = H * .5;
+      X.save(); X.globalAlpha = pa; X.beginPath(); X.arc(cx, cy, R, 0, TAU); X.clip();
+      imgCover(IMG.chlamy_lm, cx - R, cy - R, R * 2, R * 2, { zoom: 1.1 + (t - c1) * .02, filter: "grayscale(1) contrast(1.15)" });
+      X.globalCompositeOperation = "multiply"; X.fillStyle = "#7ef0a0"; X.fillRect(cx - R, cy - R, R * 2, R * 2);
+      X.restore();
+      X.save(); X.globalAlpha = pa; X.strokeStyle = "rgba(170,255,210,.8)"; X.lineWidth = 3; X.beginPath(); X.arc(cx, cy, R, 0, TAU); X.stroke();
+      X.lineWidth = 1; X.strokeStyle = "rgba(170,255,210,.35)"; X.beginPath(); X.arc(cx, cy, R + 14, 0, TAU); X.stroke(); X.restore();
+      txt("衣藻", cx + R + 60, cy - 40, { f: SERIF, w: 900, size: 72, c: COL.white, align: "left", glow: "rgba(90,255,140,.6)", a: pa * seg(t, c1 + .6, c1 + 1.3) });
+      txt("Chlamydomonas reinhardtii", cx + R + 62, cy + 30, { f: LAT, w: 400, size: 28, c: COL.green, align: "left", a: pa * seg(t, c1 + .9, c1 + 1.6) });
+      txt("单细胞绿藻 · 扫描电镜图", cx + R + 62, cy + 76, { w: 400, size: 24, c: COL.dim, align: "left", a: pa * seg(t, c1 + 1.1, c1 + 1.8) });
+      credit("SEM: Dartmouth Electron Microscope Facility / Wikimedia Commons, Public domain", pa * ma);
+    }
+    if (t < c1) txt("答案，藏在一片池塘里", W / 2, H / 2, { f: SERIF, w: 900, size: 76, c: COL.white, glow: "rgba(90,255,160,.6)", a: fio(t, .4, c1 + .1, .8, .5) });
+  }
+  // swimming alga toward light
+  const sa = seg(t, c2 - .2, c2 + .6);
+  if (sa > 0) {
+    const zoom = eio(seg(t, c3 - .3, c3 + 1.6));
+    const lx = W - 120, ly = H * .32;
+    // light source
+    const lg = X.createRadialGradient(lx, ly, 0, lx, ly, 700);
+    lg.addColorStop(0, `rgba(180,230,255,${.55 * sa * (1 - zoom)})`); lg.addColorStop(.3, `rgba(90,170,255,${.2 * sa * (1 - zoom)})`); lg.addColorStop(1, "rgba(0,0,0,0)");
+    X.fillStyle = lg; X.fillRect(0, 0, W, H);
+    for (let i = 0; i < 9; i++) {
+      X.save(); X.globalCompositeOperation = "lighter"; X.globalAlpha = sa * (1 - zoom) * .14;
+      X.globalAlpha = sa * (1 - zoom) * .07; X.strokeStyle = "#9fd4ff"; X.lineWidth = 70; X.beginPath(); X.moveTo(lx, ly); X.lineTo(lx - 1600, ly - 500 + i * 140); X.stroke(); X.restore();
+    }
+    const k = eio(seg(t, c2, c3 + 1.5));
+    const ax = lerp(460, 1150, k) + 10 * Math.sin(t * 4), ay = lerp(H * .7, H * .45, k) + 8 * Math.cos(t * 3);
+    const ang = Math.atan2(ly - ay, lx - ax) + Math.PI; // front faces -x in local coords
+    // camera zoom into eyespot
+    X.save();
+    const zs = lerp(1, 2.3, zoom), ca = Math.cos(ang), sn = Math.sin(ang);
+    const fx = ax + 1.2 * (ca * -35 - sn * -58), fy = ay + 1.2 * (sn * -35 + ca * -58);
+    X.translate(lerp(W / 2, W * .56, zoom), lerp(H / 2, H * .42, zoom)); X.scale(zs, zs); X.translate(-lerp(W / 2, fx, zoom), -lerp(H / 2, fy, zoom));
+    drawAlga(ax, ay, ang, 1.2, t, { a: sa });
+    X.restore();
+    if (zoom < .2) {
+      label("没有眼睛，却会追着光游", W * .3, H - 140, { size: 30, a: sa * fio(t, c2 + .4, c3, .5, .4) });
+      label("☀ 光", lx - 120, ly + 80, { size: 26, a: sa * (1 - zoom), border: "rgba(160,210,255,.6)" });
+    }
+    if (zoom > .5) {
+      const za = seg(t, c3 + 1.2, c3 + 1.9) * (1 - seg(t, c4 + 3.5, c4 + 4.5));
+      label("眼点 · 感光区", W * .56 + 120, H * .42 - 120, { size: 28, a: za, border: rgba(COL.amber, .7), align: "left" });
+      // gene bar
+      const ga = seg(t, c3 + 2.6, c3 + 3.4) * (1 - seg(t, c4 - .3, c4 + .3));
+      if (ga > 0) {
+        X.save(); X.globalAlpha = ga;
+        const gx = W / 2 - 520, gy = H - 250, segs = 26;
+        for (let i = 0; i < segs; i++) {
+          const hl = i >= 11 && i <= 15;
+          X.fillStyle = hl ? COL.cyan : ["#2f4a7a", "#3b5a8c", "#28406c"][i % 3];
+          if (hl) { X.shadowColor = COL.cyan; X.shadowBlur = 25; } else X.shadowBlur = 0;
+          roundRect(gx + i * 40, gy, 36, 34, 6); X.fill();
+        }
+        X.restore();
+        txt("感光基因", gx + 13 * 40 + 18, gy - 40, { w: 700, size: 30, c: COL.cyan, a: ga });
+        portraitMini("hegemann", "黑格曼", W - 330, 260, ga, "找到感光基因");
+      }
+      const na = seg(t, c4 + .2, c4 + 1);
+      if (na > 0) {
+        // door metaphor
+        const ox = W * .2, oy = H / 2 + 20;
+        X.save(); X.globalAlpha = na;
+        roundRect(ox - 170, oy - 220, 340, 440, 30); X.fillStyle = "rgba(6,14,30,.86)"; X.fill(); X.strokeStyle = rgba(COL.cyan, .6); X.lineWidth = 2; X.stroke();
+        const open = .5 + .5 * Math.sin((t - c4) * 2.4);
+        X.fillStyle = "#1c3a66"; roundRect(ox - 110, oy - 150, 220, 280, 10); X.fill();
+        X.fillStyle = rgba(COL.blue, .9); X.shadowColor = COL.blue; X.shadowBlur = 30 * open;
+        X.fillRect(ox - 110, oy - 150, 110 * (1 - open * .8), 280); X.fillRect(ox + 110 - 110 * (1 - open * .8), oy - 150, 110 * (1 - open * .8), 280);
+        X.restore();
+        txt("光控的门", ox, oy + 180, { f: SERIF, w: 900, size: 40, c: COL.white, a: na });
+        portraitMini("nagel", "纳格尔", W - 330, 620, na, "证明它是离子通道");
+      }
+    }
+  }
+  chapter(t, "02", "来自绿藻的线索", d);
+  vignette(.7);
+};
+function portraitMini(img, name, x, y, a, note) {
+  if (a <= 0) return;
+  X.save(); X.globalAlpha *= a;
+  X.save(); X.beginPath(); X.arc(x, y, 90, 0, TAU); X.clip(); imgCover(IMG[img], x - 90, y - 90, 180, 180, { py: .3 }); X.restore();
+  X.strokeStyle = rgba(COL.gold, .9); X.lineWidth = 3; X.beginPath(); X.arc(x, y, 92, 0, TAU); X.stroke();
+  X.restore();
+  txt(name, x, y + 130, { f: SERIF, w: 900, size: 34, c: COL.white, a });
+  if (note) txt(note, x, y + 175, { w: 400, size: 24, c: COL.goldHi, a });
+}
+
+// S05 — channel mechanism
+SCENES.s05 = (t, d) => {
+  bg("#050816", "#02030a");
+  const c1 = cue("s05", 1), c2 = cue("s05", 2), c3 = cue("s05", 3), c4 = cue("s05", 4), c5 = cue("s05", 5);
+  const tOpen = c2 + 1.6, tClose = c4 + .5;
+  const open = eo(seg(t, tOpen, tOpen + .25)) * (1 - eo(seg(t, tClose, tClose + .35)));
+  const enter = eo(seg(t, 0, 1.4));
+  const MY = H * .55, MT = 150; // membrane center y and thickness
+  const cx = W / 2;
+  // compartments
+  txt("细胞外", 150, MY - 300, { w: 500, size: 30, c: COL.dim, align: "left", a: seg(t, 1, 2) });
+  txt("细胞内", 150, MY + 300, { w: 500, size: 30, c: COL.dim, align: "left", a: seg(t, 1, 2) });
+  const inner = X.createLinearGradient(0, MY + MT / 2, 0, H);
+  inner.addColorStop(0, `rgba(30,60,120,${.25 + .25 * open})`); inner.addColorStop(1, "rgba(0,0,0,0)");
+  X.fillStyle = inner; X.fillRect(0, MY + MT / 2, W, H);
+  const gap = 55 * open;
+  // lipids
+  X.save(); X.globalAlpha = enter;
+  for (let x = 20; x < W; x += 30) {
+    if (x > cx - 175 - gap && x < cx + 135 + gap) continue;
+    for (const side of [-1, 1]) {
+      const y = MY + side * MT / 2 + Math.sin(x * .02 + t * 1.5) * 3;
+      X.strokeStyle = "rgba(143,163,200,.45)"; X.lineWidth = 2.5;
+      X.beginPath(); X.moveTo(x - 4, y); X.quadraticCurveTo(x - 7, y - side * 35, x - 4, y - side * 62); X.moveTo(x + 4, y); X.quadraticCurveTo(x + 7, y - side * 35, x + 4, y - side * 62); X.stroke();
+      X.fillStyle = "#8fb0e8"; X.beginPath(); X.arc(x, y, 12, 0, TAU); X.fill();
+    }
+  }
+  X.restore();
+  // channel helices
+  const helCol = ["#3ea6ff", "#4fb6ff", "#2f8ff0", "#5cc4ff", "#3a9cf5", "#6ad0ff", "#2b86e6"];
+  X.save(); X.globalAlpha = enter;
+  const hx = [-4, -3, -2, 2, 3, 4, -1];
+  for (let i = 0; i < 7; i++) {
+    const side = hx[i] < 0 ? -1 : 1, off = (Math.abs(hx[i]) - 2) * 34;
+    const x = i === 6 ? cx - 140 - gap : cx + side * (gap + off + 17);
+    const tilt = side * .06 * open;
+    X.save(); X.translate(x, MY); X.rotate(tilt);
+    const g = X.createLinearGradient(-17, 0, 17, 0); g.addColorStop(0, "#123a6b"); g.addColorStop(.5, helCol[i]); g.addColorStop(1, "#123a6b");
+    X.fillStyle = g; X.shadowColor = rgba(COL.blue, .6 + .4 * open); X.shadowBlur = 18 + 30 * open;
+    roundRect(-17, -MT * .78, 34, MT * 1.56, 17); X.fill(); X.shadowBlur = 0;
+    X.strokeStyle = "rgba(255,255,255,.18)"; X.lineWidth = 2;
+    for (let k = -4; k <= 4; k++) { X.beginPath(); X.moveTo(-15, k * 26); X.quadraticCurveTo(0, k * 26 + 12, 15, k * 26 - 4); X.stroke(); }
+    X.restore();
+  }
+  X.restore();
+  // retinal (zigzag inside, bends when light hits)
+  const bend = eo(seg(t, tOpen - .25, tOpen)) * (1 - seg(t, tClose, tClose + .3));
+  X.save(); X.globalAlpha = enter; X.strokeStyle = COL.amber; X.lineWidth = 5; X.lineJoin = "round"; X.shadowColor = COL.amber; X.shadowBlur = 15 + 25 * bend;
+  X.beginPath();
+  const rx = cx - gap - 70, ry = MY - 10;
+  for (let k = 0; k < 8; k++) {
+    const px = rx + k * 16 * (1 - bend * .2), py = ry + (k % 2 ? -10 : 10) + (k > 4 ? bend * (k - 4) * -14 : 0);
+    k ? X.lineTo(px, py) : X.moveTo(px, py);
+  }
+  X.stroke(); X.restore();
+  label("视黄醛", rx - 30, ry + 70, { size: 22, a: enter * seg(t, 1.6, 2.4), border: rgba(COL.amber, .6), align: "right" });
+  // ions outside & flowing
+  const R = rng(5);
+  for (let i = 0; i < 60; i++) {
+    const bx = R() * W, by = MY - MT / 2 - 60 - R() * 300, ph = R() * TAU;
+    const jx = bx + 12 * Math.sin(t * 1.3 + ph), jy = by + 10 * Math.cos(t * 1.1 + ph);
+    ionDot(jx, jy, enter * .85);
+  }
+  // flowing ions through pore (deterministic stream)
+  for (let i = 0; i < 26; i++) {
+    const per = 1.3, ph = i / 26;
+    const cyc = Math.floor((t - tOpen) / per + ph);
+    const k = frac((t - tOpen) / per + ph);
+    const born = tOpen + (cyc - ph) * per; // when this particle entered
+    if (born < tOpen - .05 || born > tClose) continue;
+    const sx = cx + (hash(i * 13 + cyc) - .5) * 600, sy = MY - 360;
+    let x, y;
+    if (k < .45) { const u = eio(k / .45); x = lerp(sx, cx + (hash(i) - .5) * 20, u); y = lerp(sy, MY - MT * .8, u); }
+    else if (k < .65) { const u = (k - .45) / .2; x = cx + (hash(i) - .5) * 20; y = lerp(MY - MT * .8, MY + MT * .8, u); }
+    else { const u = eo((k - .65) / .35); x = cx + (hash(i) - .5) * 20 + (hash(i + 7) - .5) * 700 * u; y = lerp(MY + MT * .8, MY + 330, u); }
+    ionDot(x, y, 1 - (k > .9 ? (k - .9) * 10 : 0));
+  }
+  // light source & photons
+  const la = fio(t, c2 - .2, tClose, .4, .3);
+  if (la > 0) {
+    const g = X.createRadialGradient(cx - 600, 60, 0, cx - 600, 60, 900);
+    g.addColorStop(0, `rgba(80,170,255,${.45 * la})`); g.addColorStop(1, "rgba(0,0,0,0)");
+    X.fillStyle = g; X.fillRect(0, 0, W, H);
+    for (let p = 0; p < 4; p++) photon(cx - 640 + p * 30, 40 - p * 20, cx - gap - 20, MY - 20, seg(t, tOpen - 1.6 + p * .45, tOpen + p * .45 - .1), COL.blue, 12, 8);
+    label("蓝光 ~470 nm", cx - 560, 150, { size: 26, a: la, border: rgba(COL.blue, .7) });
+  }
+  // labels
+  txt("通道视紫红质", W / 2, 120, { f: SERIF, w: 900, size: 78, c: COL.white, glow: "rgba(70,160,255,.8)", a: seg(t, .6, 1.5) * (1 - seg(t, c5 - .3, c5 + .3)) });
+  txt("Channelrhodopsin", W / 2, 192, { f: LAT, w: 600, size: 30, c: COL.cyan, ls: 4, a: seg(t, 1, 1.8) * (1 - seg(t, c5 - .3, c5 + .3)) });
+  const st = open > .5 ? "门打开" : "门关闭";
+  label(st, cx + 260, MY - MT - 70, { size: 30, a: seg(t, c1, c1 + .4) * (1 - seg(t, c5 - .3, c5)), border: open > .5 ? rgba(COL.cyan, .9) : "rgba(255,255,255,.35)", c: open > .5 ? COL.cyan : COL.white, align: "left" });
+  if (t > tOpen && t < c3 + .5) txt("< 1 毫秒", cx + 420, MY + 40, { f: SERIF, w: 900, size: 56, c: COL.cyan, glow: COL.blue, a: fio(t, tOpen, c3 + .5, .2, .4), align: "left" });
+  label("⊕ 带正电的离子涌入", cx + 380, MY + 260, { size: 28, a: fio(t, c3, c4 + .8, .4, .4), border: rgba(COL.ion, .7) });
+  // years
+  const ya = seg(t, c5, c5 + .6);
+  if (ya > 0) {
+    X.save(); X.globalAlpha = ya; X.fillStyle = "rgba(2,4,12,.72)"; X.fillRect(0, 0, W, 330); X.restore();
+    [["2002", "Science", "ChR1"], ["2003", "PNAS", "ChR2"]].forEach(([y, j, n], i) => {
+      const a = seg(t, c5 + .3 + i * .9, c5 + 1 + i * .9), x = W / 2 + (i ? 300 : -300);
+      txt(y, x, 120, { f: SERIF, w: 900, size: 96, c: COL.goldHi, glow: rgba(COL.gold, .6), a });
+      txt(`${j} · ${n}`, x, 205, { f: LAT, w: 600, size: 30, c: COL.white, a });
+    });
+    txt("Nagel, Hegemann, Bamberg 等", W / 2, 270, { f: LAT, w: 400, size: 24, c: COL.dim, a: seg(t, c5 + 1.8, c5 + 2.6) });
+  }
+  chapter(t, "03", "一扇光控的门", d);
+  vignette(.6);
+};
+function ionDot(x, y, a) {
+  if (a <= 0) return;
+  glowDot(x, y, 22, "rgba(255,150,60,0.8)", a * .7);
+  X.save(); X.globalAlpha *= a; X.fillStyle = "#ffb15c"; X.beginPath(); X.arc(x, y, 8, 0, TAU); X.fill();
+  X.strokeStyle = "#3b1d00"; X.lineWidth = 2; X.beginPath(); X.moveTo(x - 4, y); X.lineTo(x + 4, y); X.moveTo(x, y - 4); X.lineTo(x, y + 4); X.stroke(); X.restore();
+}
+
+// S06 — into neurons
+const NEU = makeNeuron(1234, .88);
+const FLASH0 = 11.9, FLASH_STEP = 1.0, FLASH_END = 20.3;
+function flashLevel(t) {
+  if (t < FLASH0 - .05 || t > FLASH_END) return [0, -1];
+  const k = Math.floor((t - FLASH0) / FLASH_STEP), lt = t - FLASH0 - k * FLASH_STEP;
+  return [lt < .14 ? 1 - lt / .14 * .3 : Math.max(0, .7 - (lt - .14) * 3), k];
+}
+SCENES.s06 = (t, d) => {
+  bg("#03081a", "#010208");
+  const c1 = cue("s06", 1), c2 = cue("s06", 2), c3 = cue("s06", 3), c4 = cue("s06", 4);
+  // intro: portrait + 2005
+  const ia = fio(t, .3, c1 + 1.2, .6, .6);
+  if (ia > 0) {
+    portraitCard(LAUREATES[2], W * .3, H / 2, ia * eo(seg(t, .3, 1.1)), 1.05);
+    txt("2005", W * .62, H / 2 - 80, { f: SERIF, w: 900, size: 190, c: COL.white, glow: "rgba(70,160,255,.9)", blur: 50, a: ia * seg(t, 1.2, 2), ls: 6 });
+    txt("斯坦福大学 · 戴瑟罗斯团队", W * .62, H / 2 + 60, { w: 500, size: 36, c: COL.goldHi, a: ia * seg(t, 1.6, 2.4) });
+    txt("Boyden, Zhang, Bamberg, Nagel & Deisseroth · Nature Neuroscience", W * .62, H / 2 + 120, { f: LAT, w: 400, size: 22, c: COL.dim, a: ia * seg(t, 2, 2.8) });
+    credit("Photo: Cmichel67 / Wikimedia Commons, CC BY-SA 4.0", ia);
+  }
+  // gene delivery
+  const ga = fio(t, c1 + .6, c2 + .4, .6, .5);
+  const nx = W * .56, ny = H * .5;
+  const neuA = seg(t, c1 + 1.0, c1 + 2.4);
+  // flash state
+  const [fl, fk] = flashLevel(t);
+  if (neuA > 0) {
+    drawNeuron(NEU, nx, ny, { color: fl > 0 ? "#9fe3ff" : "#2f6fb8", glow: .25 + fl, a: neuA });
+    // expressed channels dots
+    const ex = seg(t, c1 + 4.2, c1 + 6.2);
+    if (ex > 0) {
+      const R = rng(77);
+      for (let i = 0; i < 70; i++) {
+        const b = NEU.branches[Math.floor(R() * NEU.branches.length)], p = b.pts[Math.floor(R() * b.pts.length)];
+        if (R() > ex) continue;
+        glowDot(nx + p[0], ny + p[1], 12, "rgba(110,231,255,0.9)", neuA * (.6 + .4 * fl));
+      }
+      label("细胞膜上长出了“光控的门”", nx, ny + 470, { size: 28, a: fio(t, c1 + 4.4, c2 + .2, .5, .4) });
+    }
+  }
+  if (ga > 0) {
+    // DNA helix flying into virus then to neuron
+    const k = seg(t, c1 + .8, c1 + 3.6);
+    const hx0 = W * .16, hy0 = H * .62;
+    X.save(); X.globalAlpha = ga * (1 - seg(t, c1 + 2.4, c1 + 3.0));
+    for (let s = 0; s < 2; s++) {
+      X.strokeStyle = s ? "#6fe7ff" : "#3ea6ff"; X.lineWidth = 6; X.beginPath();
+      for (let i = 0; i <= 80; i++) { const x = hx0 - 260 + i * 6.5, y = hy0 + Math.sin(i * .18 + t * 2 + s * Math.PI) * 40; i ? X.lineTo(x, y) : X.moveTo(x, y); }
+      X.stroke();
+    }
+    for (let i = 0; i <= 80; i += 4) {
+      const x = hx0 - 260 + i * 6.5, y1 = hy0 + Math.sin(i * .18 + t * 2) * 40, y2 = hy0 + Math.sin(i * .18 + t * 2 + Math.PI) * 40;
+      X.strokeStyle = i > 30 && i < 52 ? COL.amber : "rgba(160,200,255,.5)"; X.lineWidth = 3; X.beginPath(); X.moveTo(x, y1); X.lineTo(x, y2); X.stroke();
+    }
+    X.restore();
+    txt("ChR2 基因", hx0, hy0 - 90, { w: 700, size: 30, c: COL.amber, a: ga * (1 - seg(t, c1 + 2.4, c1 + 3.0)) });
+    // virus capsule
+    const vk = eio(seg(t, c1 + 2.6, c1 + 4.4)), va = ga * seg(t, c1 + 2.2, c1 + 2.8);
+    const vx = lerp(hx0, nx - 40, vk), vy = lerp(hy0, ny - 30, vk);
+    if (va > 0 && vk < .98) {
+      X.save(); X.translate(vx, vy); X.rotate(t); X.globalAlpha = va;
+      X.strokeStyle = "#b9a6ff"; X.fillStyle = "rgba(120,90,255,.25)"; X.lineWidth = 3; X.beginPath();
+      for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; X.lineTo(Math.cos(a) * 55, Math.sin(a) * 55); } X.closePath(); X.fill(); X.stroke();
+      for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; X.beginPath(); X.moveTo(0, 0); X.lineTo(Math.cos(a) * 55, Math.sin(a) * 55); X.stroke(); }
+      X.restore();
+      label("病毒载体", vx, vy - 100, { size: 24, a: va * (1 - vk), border: "rgba(185,166,255,.7)" });
+    }
+  }
+  // flashes & scope
+  if (t > c2 - .5) {
+    const sa = seg(t, c2 - .5, c2 + .3);
+    if (fl > 0) {
+      const g = X.createRadialGradient(nx, ny - 200, 0, nx, ny - 200, 900);
+      g.addColorStop(0, `rgba(80,170,255,${.5 * fl})`); g.addColorStop(1, "rgba(0,0,0,0)");
+      X.save(); X.globalCompositeOperation = "lighter"; X.fillStyle = g; X.fillRect(0, 0, W, H); X.restore();
+      // spike travelling down axon
+    }
+    if (fk >= 0) {
+      const lt = t - FLASH0 - fk * FLASH_STEP, u = clamp(lt / .55);
+      const p = NEU.axon[Math.min(NEU.axon.length - 1, Math.floor(u * NEU.axon.length))];
+      glowDot(nx + p[0], ny + p[1], 40, "rgba(170,240,255,1)", 1 - u * .5);
+    }
+    // fiber optic
+    X.save(); X.globalAlpha = sa; X.strokeStyle = "#cfd8e6"; X.lineWidth = 10; X.lineCap = "round";
+    X.beginPath(); X.moveTo(nx - 420, -20); X.quadraticCurveTo(nx - 380, ny - 300, nx - 170, ny - 230); X.stroke(); X.restore();
+    glowDot(nx - 170, ny - 230, 60 + 60 * fl, "rgba(90,180,255,1)", sa * (.3 + fl));
+    label("蓝光", nx - 230, ny - 330, { size: 26, a: sa, border: rgba(COL.blue, .7) });
+    // oscilloscope
+    const ox = W - 610, oy = H - 330, ow = 520, oh = 230;
+    X.save(); X.globalAlpha = sa;
+    roundRect(ox, oy, ow, oh, 20); X.fillStyle = "rgba(4,12,24,.88)"; X.fill(); X.strokeStyle = rgba(COL.cyan, .5); X.lineWidth = 2; X.stroke();
+    X.strokeStyle = "rgba(111,231,255,.08)"; X.lineWidth = 1;
+    for (let i = 1; i < 8; i++) { X.beginPath(); X.moveTo(ox + i * ow / 8, oy); X.lineTo(ox + i * ow / 8, oy + oh); X.stroke(); }
+    for (let i = 1; i < 4; i++) { X.beginPath(); X.moveTo(ox, oy + i * oh / 4); X.lineTo(ox + ow, oy + i * oh / 4); X.stroke(); }
+    // trace: window of 5s ending at t
+    const win = 5, base = oy + oh * .72;
+    const trace = (col, fn) => { X.strokeStyle = col; X.lineWidth = 3; X.beginPath(); for (let i = 0; i <= ow; i += 2) { const tt = t - win + i / ow * win; const v = fn(tt); i ? X.lineTo(ox + i, v) : X.moveTo(ox + i, v); } X.stroke(); };
+    // light bars
+    for (let k = 0; k < 10; k++) { const ft = FLASH0 + k * FLASH_STEP; if (ft > FLASH_END) break; const px = ox + (ft - (t - win)) / win * ow; if (px < ox || px > ox + ow || ft > t) continue; X.fillStyle = "rgba(62,166,255,.35)"; X.fillRect(px, oy + 8, 8, 24); }
+    X.shadowColor = COL.cyan; X.shadowBlur = 12;
+    trace(COL.cyan, tt => {
+      let v = base + Math.sin(tt * 40) * 1.5;
+      for (let k = 0; k < 10; k++) { const ft = FLASH0 + k * FLASH_STEP + .03; if (ft > FLASH_END || tt < ft || tt > ft + .25) continue; const u = (tt - ft) / .25; v -= (u < .15 ? u / .15 : u < .4 ? 1 - (u - .15) / .25 * 1.25 : -.25 * (1 - (u - .4) / .6)) * oh * .6; }
+      return tt > t ? NaN : v;
+    });
+    X.restore();
+    txt("神经电信号", ox + 20, oy - 26, { w: 500, size: 24, c: COL.dim, align: "left", a: sa });
+    txt("■ 光脉冲", ox + ow - 10, oy - 26, { w: 400, size: 20, c: COL.blue, align: "right", a: sa });
+  }
+  if (t > c3) txt("精确到毫秒", W * .2, H * .3, { f: SERIF, w: 900, size: 72, c: COL.white, glow: "rgba(70,160,255,.9)", a: fio(t, c3 + .2, c4 + .2, .5, .5) });
+  if (t > c4) {
+    const a = seg(t, c4 + .1, c4 + .8);
+    X.save(); X.globalAlpha = a; X.fillStyle = "rgba(2,4,12,.86)"; X.fillRect(0, 0, W, H); X.restore();
+    txt("光", W / 2 - 230, H / 2 - 20, { f: SERIF, w: 900, size: 200, c: COL.white, glow: "rgba(70,160,255,1)", blur: 60, a, double: true });
+    txt("=", W / 2 - 40, H / 2 - 20, { f: LAT, w: 600, size: 120, c: COL.dim, a });
+    // switch icon
+    const on = seg(t, c4 + .9, c4 + 1.2);
+    X.save(); X.globalAlpha = a; X.translate(W / 2 + 230, H / 2 - 20);
+    roundRect(-130, -64, 260, 128, 64); X.fillStyle = on ? `rgba(62,166,255,${.3 + .6 * on})` : "#333"; X.fill(); X.strokeStyle = COL.cyan; X.lineWidth = 3; X.stroke();
+    X.shadowColor = COL.cyan; X.shadowBlur = 30 * on; X.fillStyle = "#fff"; X.beginPath(); X.arc(lerp(-66, 66, eio(on)), 0, 50, 0, TAU); X.fill();
+    X.restore();
+    txt("神经元的开关", W / 2, H / 2 + 160, { f: SERIF, w: 900, size: 60, c: COL.goldHi, a: seg(t, c4 + .6, c4 + 1.3) });
+  }
+  chapter(t, "04", "把开关装进神经元", d);
+  vignette(.6);
+};
+
+// S07 — on & off
+const NEU2 = makeNeuron(555, .62), NEU3 = makeNeuron(556, .62);
+SCENES.s07 = (t, d) => {
+  bg("#050712", "#020306");
+  const c1 = cue("s07", 1), c2 = cue("s07", 2), c3 = cue("s07", 3);
+  const sp = 1 - seg(t, c2 - .2, c2 + .5);
+  if (sp > 0) {
+    const lx = W * .27, rx = W * .73, y = H * .53;
+    X.save(); X.globalAlpha = sp;
+    X.fillStyle = "rgba(255,255,255,.06)"; X.fillRect(W / 2 - 1, 140, 2, H - 280);
+    // blue side
+    const bf = .5 + .5 * Math.sin(t * 7) > .6 ? 1 : .25;
+    const g1 = X.createRadialGradient(lx, 160, 0, lx, 160, 600); g1.addColorStop(0, "rgba(62,166,255,.45)"); g1.addColorStop(1, "rgba(0,0,0,0)"); X.fillStyle = g1; X.fillRect(0, 0, W / 2, H);
+    drawNeuron(NEU2, lx, y, { color: bf > .5 ? "#a8e9ff" : "#3576c4", glow: bf, a: 1 });
+    // yellow side
+    const ya = seg(t, c1 - .4, c1 + .4);
+    const g2 = X.createRadialGradient(rx, 160, 0, rx, 160, 600); g2.addColorStop(0, `rgba(255,190,60,${.45 * ya})`); g2.addColorStop(1, "rgba(0,0,0,0)"); X.fillStyle = g2; X.fillRect(W / 2, 0, W / 2, H);
+    drawNeuron(NEU3, rx, y, { color: ya > .5 ? "#5d4a2a" : "#6a5a3a", glow: 0, a: .35 + .65 * seg(t, .5, 1.5) });
+    if (ya > 0) for (let i = 0; i < 14; i++) { const k = frac(t * .6 + i / 14); ionDotNeg(rx - 200 + (i % 7) * 66, lerp(y - 330, y - 30, k), ya * Math.sin(k * Math.PI)); }
+    X.restore();
+    txt("开", lx, 175, { f: SERIF, w: 900, size: 120, c: COL.white, glow: COL.blue, blur: 50, a: sp * seg(t, .5, 1.2) });
+    txt("ChR2 · 蓝光 → 放电", lx, 265, { w: 500, size: 30, c: COL.cyan, a: sp * seg(t, .8, 1.5) });
+    txt("关", rx, 175, { f: SERIF, w: 900, size: 120, c: COL.white, glow: COL.amber, blur: 50, a: sp * seg(t, c1 - .4, c1 + .3) });
+    txt("盐视紫红质 NpHR · 黄光 → 安静", rx, 265, { w: 500, size: 30, c: COL.amber, a: sp * seg(t, c1, c1 + .7) });
+    txt("2007 · Nature", rx, 308, { f: LAT, w: 400, size: 22, c: COL.dim, a: sp * seg(t, c1 + .5, c1 + 1.2) });
+    // traces
+    traceMini(lx - 260, H - 250, 520, 110, t, true, sp);
+    traceMini(rx - 260, H - 250, 520, 110, t, false, sp * ya);
+  }
+  // selective control: population
+  const pa = seg(t, c2 - .1, c2 + .7);
+  if (pa > 0) {
+    const R = rng(31), on = Math.floor((t - c2) / 1.4) % 2 === 0;
+    for (let i = 0; i < 90; i++) {
+      const x = 260 + R() * 900, y = 220 + R() * 640, target = i % 5 === 0;
+      const col = target ? (on ? "rgba(110,231,255,1)" : "rgba(60,90,130,1)") : "rgba(130,120,170,1)";
+      glowDot(x, y, target && on ? 60 : 26, col.replace(",1)", ",.8)"), pa);
+      X.fillStyle = rgba(target ? "#bff4ff" : "#8f8ab0", pa * (target ? 1 : .6)); X.beginPath(); X.arc(x, y, target ? 13 : 9, 0, TAU); X.fill();
+    }
+    label(on ? "开启特定的一类细胞" : "关闭特定的一类细胞", 710, 900, { size: 30, a: pa, border: on ? rgba(COL.cyan, .8) : rgba(COL.amber, .8) });
+    // mouse
+    const ma = seg(t, c3 - .2, c3 + .6);
+    mouse(W * .74, H * .55, t, on, pa * (.4 + .6 * ma));
+    txt(on ? "行为改变了？" : "……", W * .74, H * .32, { f: SERIF, w: 900, size: 52, c: COL.white, a: ma * pa });
+  }
+  chapter(t, "05", "开与关", d);
+  vignette(.6);
+};
+function ionDotNeg(x, y, a) {
+  if (a <= 0) return;
+  glowDot(x, y, 20, "rgba(120,255,170,0.8)", a * .6);
+  X.save(); X.globalAlpha *= a; X.fillStyle = "#79f2a6"; X.beginPath(); X.arc(x, y, 7, 0, TAU); X.fill();
+  X.strokeStyle = "#063"; X.lineWidth = 2; X.beginPath(); X.moveTo(x - 4, y); X.lineTo(x + 4, y); X.stroke(); X.restore();
+}
+function traceMini(x, y, w, h, t, firing, a) {
+  if (a <= 0) return;
+  X.save(); X.globalAlpha = a; roundRect(x, y, w, h, 14); X.fillStyle = "rgba(4,12,24,.8)"; X.fill();
+  X.strokeStyle = firing ? COL.cyan : COL.amber; X.lineWidth = 2.5; X.beginPath();
+  for (let i = 0; i <= w; i += 2) {
+    const tt = t - 3 + i / w * 3; let v = y + h * .62 + Math.sin(tt * 50) * 1.2;
+    if (firing) { const ph = frac(tt * 7 / (2 * Math.PI) * 1.0); if (ph < .12) v -= Math.sin(ph / .12 * Math.PI) * h * .5; }
+    else v += h * .15;
+    i ? X.lineTo(x + i, v) : X.moveTo(x + i, v);
+  }
+  X.stroke(); X.restore();
+}
+function mouse(x, y, t, active, a) {
+  if (a <= 0) return;
+  const run = active ? Math.sin(t * 14) * 6 : 0, dx = active ? Math.sin(t * 1.6) * 120 : 0;
+  X.save(); X.globalAlpha = a; X.translate(x + dx, y);
+  X.fillStyle = "#c9cfdc";
+  X.beginPath(); X.ellipse(0, 0, 120, 70, 0, 0, TAU); X.fill();
+  X.beginPath(); X.ellipse(110, -25, 60, 45, -.3, 0, TAU); X.fill();
+  X.fillStyle = "#e6b8c2"; X.beginPath(); X.arc(95, -75, 26, 0, TAU); X.fill();
+  X.fillStyle = "#111"; X.beginPath(); X.arc(140, -35, 6, 0, TAU); X.fill();
+  X.strokeStyle = "#c9cfdc"; X.lineWidth = 6; X.lineCap = "round"; X.beginPath(); X.moveTo(-115, 10); X.quadraticCurveTo(-220, 40 + run, -260, -20); X.stroke();
+  X.lineWidth = 10; for (const lx of [-60, 50]) { X.beginPath(); X.moveTo(lx, 55); X.lineTo(lx + run * 2, 90); X.stroke(); }
+  // head fiber
+  X.strokeStyle = "#dfe6f2"; X.lineWidth = 5; X.beginPath(); X.moveTo(100, -60); X.quadraticCurveTo(110, -200, 40, -300); X.stroke();
+  glowDot(100, -62, 40, active ? "rgba(90,180,255,1)" : "rgba(255,190,60,1)", .9);
+  X.restore();
+}
+
+// S08 — impact
+function brainPath(cx, cy, s) {
+  X.beginPath();
+  X.moveTo(cx - 330 * s, cy + 40 * s);
+  X.bezierCurveTo(cx - 380 * s, cy - 120 * s, cx - 250 * s, cy - 290 * s, cx - 40 * s, cy - 300 * s);
+  X.bezierCurveTo(cx + 180 * s, cy - 310 * s, cx + 350 * s, cy - 200 * s, cx + 360 * s, cy - 30 * s);
+  X.bezierCurveTo(cx + 370 * s, cy + 90 * s, cx + 300 * s, cy + 150 * s, cx + 200 * s, cy + 150 * s);
+  X.bezierCurveTo(cx + 120 * s, cy + 160 * s, cx + 60 * s, cy + 120 * s, cx - 20 * s, cy + 130 * s);
+  X.bezierCurveTo(cx - 160 * s, cy + 150 * s, cx - 300 * s, cy + 140 * s, cx - 330 * s, cy + 40 * s);
+}
+function drawBrain(cx, cy, s, t, a) {
+  X.save(); X.globalAlpha = a;
+  brainPath(cx, cy, s); const g = X.createRadialGradient(cx, cy - 80 * s, 50, cx, cy, 400 * s);
+  g.addColorStop(0, "rgba(40,70,130,.55)"); g.addColorStop(1, "rgba(10,18,40,.75)"); X.fillStyle = g; X.fill();
+  X.strokeStyle = "rgba(140,190,255,.8)"; X.lineWidth = 3; X.shadowColor = COL.blue; X.shadowBlur = 20; X.stroke(); X.shadowBlur = 0;
+  // gyri
+  X.save(); brainPath(cx, cy, s); X.clip();
+  X.strokeStyle = "rgba(140,190,255,.22)"; X.lineWidth = 2.5;
+  const R = rng(4);
+  for (let i = 0; i < 26; i++) {
+    let x = cx + (R() - .5) * 640 * s, y = cy + (R() - .7) * 380 * s, ang = R() * TAU;
+    X.beginPath(); X.moveTo(x, y);
+    for (let k = 0; k < 6; k++) { ang += (R() - .5) * 2.2; const nx = x + Math.cos(ang) * 40 * s, ny = y + Math.sin(ang) * 40 * s; X.quadraticCurveTo(x + Math.cos(ang + 1) * 25 * s, y + Math.sin(ang + 1) * 25 * s, nx, ny); x = nx; y = ny; }
+    X.stroke();
+  }
+  X.restore();
+  // cerebellum + stem
+  X.beginPath(); X.ellipse(cx + 250 * s, cy + 175 * s, 110 * s, 65 * s, -.2, 0, TAU); X.fillStyle = "rgba(25,45,90,.7)"; X.fill(); X.strokeStyle = "rgba(140,190,255,.6)"; X.stroke();
+  X.beginPath(); X.moveTo(cx + 110 * s, cy + 140 * s); X.quadraticCurveTo(cx + 120 * s, cy + 260 * s, cx + 90 * s, cy + 330 * s); X.lineTo(cx + 40 * s, cy + 330 * s); X.quadraticCurveTo(cx + 60 * s, cy + 230 * s, cx + 40 * s, cy + 135 * s); X.fillStyle = "rgba(25,45,90,.7)"; X.fill(); X.stroke();
+  X.restore();
+}
+SCENES.s08 = (t, d) => {
+  bg("#040716", "#010208");
+  const c1 = cue("s08", 1), c2 = cue("s08", 2), c3 = cue("s08", 3), c4 = cue("s08", 4);
+  const pa = fio(t, 0, c1 + .3, .5, .7);
+  if (pa > 0) {
+    imgCover(IMG.opto_rig, 0, 0, W, H, { zoom: 1.05 + t * .012, px: .45, py: .5, a: pa * .9 });
+    X.fillStyle = `rgba(0,0,10,${pa * .35})`; X.fillRect(0, 0, W, H);
+    // world map dots of labs
+    txt("数千", W / 2, H / 2 - 40, { f: SERIF, w: 900, size: 170, c: COL.white, glow: "rgba(70,160,255,1)", blur: 50, a: pa * seg(t, .8, 1.5) });
+    txt("个实验室 · 二十年", W / 2, H / 2 + 90, { w: 700, size: 46, c: COL.goldHi, a: pa * seg(t, 1.2, 2) });
+    label("光遗传学行为实验装置", 110, H - 120, { size: 24, a: pa, align: "left" });
+    credit("Photo: Bd008 / Wikimedia Commons, CC BY-SA 4.0", pa);
+  }
+  const ba = seg(t, c1 - .3, c1 + .6) * (1 - seg(t, c4 - .2, c4 + .4));
+  const cx = W * .5, cy = H * .52, s = 1.25;
+  if (ba > 0) {
+    drawBrain(cx, cy, s, t, ba);
+    const regs = [
+      { at: c1, x: cx + 60 * s, y: cy + 10 * s, c: "#6fe7ff", zh: "记忆", sub: "海马体", lx: cx - 620, ly: cy - 200 },
+      { at: c2, x: cx - 40 * s, y: cy + 70 * s, c: "#ff6b8a", zh: "恐惧 · 焦虑", sub: "杏仁核", lx: cx - 620, ly: cy + 60 },
+      { at: c3, x: cx + 110 * s, y: cy + 115 * s, c: "#ffc23a", zh: "奖赏 · 成瘾", sub: "中脑多巴胺回路", lx: cx + 520, ly: cy - 120 },
+    ];
+    regs.forEach((r, i) => {
+      const a = seg(t, r.at + .1, r.at + .8) * ba;
+      if (a <= 0) return;
+      const pulse = .75 + .25 * Math.sin(t * 5 + i);
+      glowDot(r.x, r.y, 130 * pulse, rgba(r.c, .95), a);
+      glowDot(r.x, r.y, 40, "rgba(255,255,255,.9)", a);
+      X.save(); X.globalAlpha = a; X.strokeStyle = rgba(r.c, .7); X.lineWidth = 2; X.setLineDash([6, 8]);
+      X.beginPath(); X.moveTo(r.x, r.y); X.lineTo(r.lx + (r.lx < cx ? 200 : -200), r.ly); X.stroke(); X.restore();
+      txt(r.zh, r.lx, r.ly - 10, { f: SERIF, w: 900, size: 54, c: COL.white, glow: rgba(r.c, .8), a });
+      txt(r.sub, r.lx, r.ly + 44, { w: 400, size: 26, c: r.c, a });
+    });
+    if (t > c3) {
+      // reward pathway arc
+      const k = eo(seg(t, c3 + .6, c3 + 1.8));
+      X.save(); X.globalAlpha = ba; X.strokeStyle = rgba("#ffc23a", .8); X.lineWidth = 4; X.shadowColor = "#ffc23a"; X.shadowBlur = 20;
+      X.beginPath(); const x0 = cx + 110 * s, y0 = cy + 115 * s, x1 = cx - 260 * s, y1 = cy - 20 * s;
+      for (let u = 0; u <= k; u += .02) { const x = lerp(x0, x1, u), y = lerp(y0, y1, u) - Math.sin(u * Math.PI) * 120 * s; u ? X.lineTo(x, y) : X.moveTo(x, y); }
+      X.stroke(); X.restore();
+    }
+  }
+  // black box pierced by light
+  const xa = seg(t, c4 - .1, c4 + .7);
+  if (xa > 0) {
+    const bx = W / 2, by = H / 2 + 20, S = 260;
+    X.save(); X.globalAlpha = xa;
+    // cube
+    const fr = [[-S, -S * .6], [S * .6, -S * .6], [S * .6, S], [-S, S]];
+    X.fillStyle = "#07090f"; X.strokeStyle = "rgba(120,150,200,.5)"; X.lineWidth = 2;
+    X.beginPath(); X.moveTo(bx - S, by - S * .6); X.lineTo(bx - S * .6, by - S); X.lineTo(bx + S, by - S); X.lineTo(bx + S * .6, by - S * .6); X.closePath(); X.fillStyle = "#11141d"; X.fill(); X.stroke();
+    X.beginPath(); X.moveTo(bx + S * .6, by - S * .6); X.lineTo(bx + S, by - S); X.lineTo(bx + S, by + S * .6); X.lineTo(bx + S * .6, by + S); X.closePath(); X.fillStyle = "#0b0d14"; X.fill(); X.stroke();
+    X.beginPath(); fr.forEach((p, i) => i ? X.lineTo(bx + p[0], by + p[1]) : X.moveTo(bx + p[0], by + p[1])); X.closePath(); X.fillStyle = "#07090f"; X.fill(); X.stroke();
+    // inner glow network seen through
+    const ik = seg(t, c4 + 1.2, c4 + 3.2);
+    X.save(); X.beginPath(); fr.forEach((p, i) => i ? X.lineTo(bx + p[0], by + p[1]) : X.moveTo(bx + p[0], by + p[1])); X.closePath(); X.clip();
+    const R = rng(8);
+    for (let i = 0; i < 60; i++) { const x = bx - S + R() * S * 1.6, y = by - S * .6 + R() * S * 1.6, dd = Math.hypot(x - (bx - S * .2), y - (by + S * .2)); glowDot(x, y, 26, "rgba(110,200,255,.9)", ik * clamp(1.2 - dd / (S * 1.4 * ik + 1))); }
+    X.restore();
+    X.restore();
+    // beam
+    const bk = eo(seg(t, c4 + .4, c4 + 1.4));
+    X.save(); X.globalCompositeOperation = "lighter";
+    const sx = 0, sy = 80, ex = lerp(sx, bx - S * .2, bk), ey = lerp(sy, by + S * .2, bk);
+    for (const [lw, al] of [[60, .08], [26, .2], [8, .7], [3, 1]]) { X.strokeStyle = `rgba(110,190,255,${al * xa})`; X.lineWidth = lw; X.lineCap = "round"; X.beginPath(); X.moveTo(sx, sy); X.lineTo(ex, ey); X.stroke(); }
+    X.restore();
+    glowDot(ex, ey, 120, "rgba(120,200,255,1)", xa * bk);
+    txt("大脑这只“黑箱”", W / 2, 130, { f: SERIF, w: 900, size: 64, c: COL.white, glow: "rgba(70,160,255,.8)", a: xa });
+  }
+  chapter(t, "06", "改变神经科学", d);
+  vignette(.6);
+};
+
+// S09 — clinic
+SCENES.s09 = (t, d) => {
+  bg("#07060f", "#020205");
+  const c1 = cue("s09", 1), c2 = cue("s09", 2), c3 = cue("s09", 3);
+  const ea = seg(t, .2, 1.2) * (1 - seg(t, c3 - .3, c3 + .4));
+  const cx = W * .5, cy = H * .47;
+  if (ea > 0) {
+    X.save(); X.globalAlpha = ea;
+    // eyeball
+    const g = X.createRadialGradient(cx - 80, cy - 80, 30, cx, cy, 340);
+    g.addColorStop(0, "#1b2340"); g.addColorStop(1, "#0b0f1e"); X.fillStyle = g;
+    X.beginPath(); X.arc(cx, cy, 320, 0, TAU); X.fill(); X.strokeStyle = "rgba(220,230,255,.5)"; X.lineWidth = 4; X.stroke();
+    // cornea, lens
+    X.beginPath(); X.arc(cx - 300, cy, 110, -1.1, 1.1); X.strokeStyle = "rgba(200,230,255,.6)"; X.lineWidth = 4; X.stroke();
+    X.beginPath(); X.ellipse(cx - 230, cy, 34, 85, 0, 0, TAU); X.fillStyle = "rgba(170,210,255,.35)"; X.fill();
+    // retina
+    const geneK = seg(t, c2 - .5, c2 + 2.0);
+    X.lineWidth = 16; X.strokeStyle = geneK > 0 ? `rgba(255,${Math.round(lerp(120, 90, geneK))},60,${.4 + .5 * geneK})` : "rgba(255,120,120,.4)";
+    X.shadowColor = "#ff7a3d"; X.shadowBlur = 30 * geneK;
+    X.beginPath(); X.arc(cx, cy, 300, -1.25, 1.25); X.stroke();
+    X.restore();
+    // incoming light rays
+    for (let i = -2; i <= 2; i++) {
+      const k = frac(t * .5 + (i + 2) * .2);
+      photon(cx - 760, cy + i * 40, cx + 290, cy - i * 70, seg(k, 0, .9), geneK > .5 ? COL.amber : "#9fb7ff", 8, 9);
+    }
+    label("视网膜", cx + 360, cy - 250, { size: 28, a: ea * seg(t, .8, 1.5), align: "left" });
+    if (t > c1) label("视网膜色素变性：感光细胞逐渐死亡", cx, H - 205, { size: 28, a: ea * fio(t, c1 + .5, c2, .5, .4), border: "rgba(255,120,120,.6)" });
+    if (t > c2 - .5) label("基因治疗：让剩下的神经节细胞学会感光", cx, H - 205, { size: 28, a: ea * seg(t, c2, c2 + .6), border: rgba(COL.amber, .7) });
+    if (t > c2) {
+      // goggles
+      const gk = eo(seg(t, c2 + 1.2, c2 + 2.2));
+      X.save(); X.globalAlpha = ea * gk; X.translate(cx - 620, cy - 300 + (1 - gk) * -80);
+      roundRect(-150, -60, 300, 120, 50); X.fillStyle = "#1a1d26"; X.fill(); X.strokeStyle = COL.amber; X.lineWidth = 3; X.stroke();
+      for (const sx of [-70, 70]) { glowDot(sx, 0, 70, "rgba(255,170,60,1)", .5 + .5 * Math.sin(t * 6)); X.fillStyle = "#2a1c0a"; X.beginPath(); X.arc(sx, 0, 40, 0, TAU); X.fill(); X.strokeStyle = "#ffb53d"; X.stroke(); }
+      X.restore();
+      txt("特制护目镜", cx - 620, cy - 170, { w: 500, size: 26, c: COL.amber, a: ea * gk });
+    }
+  }
+  // patient view
+  const pv = seg(t, c3 - .3, c3 + .6);
+  if (pv > 0) {
+    const reveal = eo(seg(t, c3 + .4, c3 + 2.8));
+    X.save(); X.globalAlpha = pv;
+    X.fillStyle = "#050505"; X.fillRect(0, 0, W, H);
+    // table and object as amber dots
+    const R = rng(21);
+    for (let i = 0; i < 1400; i++) {
+      const x = R() * W, y = R() * H; let inObj = false;
+      const tx = (x - W / 2) / 420, ty = (y - H * .58) / 150;
+      if (y > H * .72 && y < H * .76) inObj = true; // table edge
+      if (Math.abs(x - W / 2) < 170 && y > H * .42 && y < H * .72) inObj = true; // box object
+      const b = inObj ? reveal : .08 + .05 * Math.sin(t * 4 + i);
+      glowDot(x, y, inObj ? 10 : 6, "rgba(255,180,80,1)", b * (R() < .85 ? 1 : .5));
+    }
+    // object outline (box on table) as phosphene-like dots
+    const pts = [];
+    for (let x = W / 2 - 170; x <= W / 2 + 170; x += 22) { pts.push([x, H * .42]); pts.push([x, H * .72]); }
+    for (let y = H * .42; y <= H * .72; y += 22) { pts.push([W / 2 - 170, y]); pts.push([W / 2 + 170, y]); }
+    for (let x = 120; x <= W - 120; x += 30) pts.push([x, H * .74]);
+    pts.forEach((p, i) => glowDot(p[0] + (hash(i) - .5) * 8, p[1] + (hash(i + 99) - .5) * 8, 16, "rgba(255,190,90,1)", reveal * (.7 + .3 * Math.sin(t * 5 + i))));
+    X.restore();
+    txt("重新“看见”了桌上的物体", W / 2, 170, { f: SERIF, w: 900, size: 64, c: COL.white, glow: rgba(COL.amber, .8), a: pv * seg(t, c3 + .8, c3 + 1.6) });
+    txt("示意图 · Sahel et al., Nature Medicine 2021", W / 2, 245, { f: LAT, w: 400, size: 24, c: COL.dim, a: pv * seg(t, c3 + 1.2, c3 + 2) });
+  }
+  if (t < c1 + .3) txt("走出实验室", W / 2, 150, { f: SERIF, w: 900, size: 64, c: COL.white, glow: rgba(COL.amber, .7), a: fio(t, .3, c1 + .3, .5, .4) });
+  chapter(t, "07", "走向临床", d);
+  vignette(.6);
+};
+
+// S10 — finale
+SCENES.s10 = (t, d) => {
+  bg("#02040b", "#000");
+  const c1 = cue("s10", 1), c2 = cue("s10", 2), c3 = cue("s10", 3), c4 = cue("s10", 4);
+  // phase A: alga small in pond with light → window to brain
+  const aa = fio(t, 0, c2 + .3, .6, .8);
+  if (aa > 0) {
+    dust(t, 140, "rgba(160,255,200,0.45)", 19);
+    const k = eio(seg(t, .2, c1 + 2));
+    drawAlga(lerp(W * .3, W * .5, k), H * .52, Math.PI + .2 * Math.sin(t), lerp(.5, 1.1, k), t, { a: aa * (1 - seg(t, c1 + .6, c1 + 2.2)) });
+    // window opening into network
+    const wk = eo(seg(t, c1 + .4, c1 + 2.6));
+    if (wk > 0) {
+      const ww = 1200 * wk, wh = 680 * wk;
+      X.save(); X.globalAlpha = aa; roundRect(W / 2 - ww / 2, H / 2 - wh / 2, ww, wh, 30); X.clip();
+      X.fillStyle = "#01030a"; X.fillRect(0, 0, W, H);
+      drawNet(t, { cam: { x: t * 20, y: 0, z: 1.1 }, base: .5, spikes: .6 });
+      X.restore();
+      X.save(); X.globalAlpha = aa * wk; X.strokeStyle = rgba(COL.gold, .8); X.lineWidth = 3; roundRect(W / 2 - ww / 2, H / 2 - wh / 2, ww, wh, 30); X.stroke(); X.restore();
+      txt("一扇通往大脑的窗", W / 2, H / 2 - wh / 2 - 60, { f: SERIF, w: 900, size: 48, c: COL.white, a: aa * seg(t, c1 + 1.6, c1 + 2.4) });
+    }
+  }
+  // phase B: quote
+  const qa = seg(t, c2, c2 + 1);
+  if (qa > 0) {
+    drawNet(t, { cam: { x: t * 12, y: 0, z: .9 }, base: .22, spikes: .3, a: qa * .55 });
+    const qOut = 1 - seg(t, c4 + 3.6, c4 + 4.4);
+    txt("基础科学的力量", W / 2, H / 2 - 190, { w: 500, size: 40, c: COL.goldHi, ls: 12, a: qa * qOut });
+    txt("今天看似无用的好奇", W / 2, H / 2 - 60, { f: SERIF, w: 900, size: 84, c: COL.white, a: seg(t, c3, c3 + .8) * qOut, ls: 6 });
+    txt("或许就是明天照亮未知的那束光", W / 2, H / 2 + 70, { f: SERIF, w: 900, size: 84, c: COL.white, glow: "rgba(70,160,255,1)", blur: 50, a: seg(t, c4, c4 + .9) * qOut, ls: 6, double: true });
+    // end card
+    const ec = seg(t, c4 + 4.0, c4 + 5.0);
+    if (ec > 0) {
+      X.save(); X.globalAlpha = ec; X.fillStyle = "rgba(0,0,0,.6)"; X.fillRect(0, 0, W, H); X.restore();
+      txt("2026 诺贝尔生理学或医学奖", W / 2, H / 2 - 190, { w: 500, size: 36, c: COL.goldHi, ls: 10, a: ec });
+      txt("Peter Hegemann  ·  Georg Nagel  ·  Karl Deisseroth", W / 2, H / 2 - 110, { f: LAT, w: 600, size: 40, c: COL.white, a: ec });
+      txt("好奇心，终将照亮未知", W / 2, H / 2 + 10, { f: SERIF, w: 900, size: 96, c: COL.white, glow: "rgba(70,160,255,1)", blur: 50, a: ec, ls: 10, double: true });
+      const cr = [
+        "图片：Peter Hegemann, Georg Nagel — Millencolin (CC BY-SA 4.0 / CC0) · Karl Deisseroth — Cmichel67 (CC BY-SA 4.0)",
+        "Chlamydomonas SEM — Dartmouth EM Facility (Public domain) · GFP neurons — ManuelSchottdorf (CC BY-SA 4.0)",
+        "Brainbow — Stephen J Smith (CC BY 3.0) · Optogenetics rig — Bd008 (CC BY-SA 4.0) · 均来自 Wikimedia Commons",
+        "动画、配乐为原创 · 配音：AI 语音合成 · 资料：NobelPrize.org 新闻稿",
+      ];
+      cr.forEach((s, i) => txt(s, W / 2, H - 230 + i * 34, { f: LAT, w: 400, size: 19, c: "rgba(200,210,235,.6)", a: ec * seg(t, c4 + 4.6, c4 + 5.4) }));
+    }
+  }
+  vignette(.75);
+};
+
+// ================= SUBTITLES & MASTER =================
+function subtitles(gt) {
+  const c = TL.cues.find(c => gt >= c.start - .05 && gt <= c.end + .15);
+  if (!c) return;
+  const a = Math.min(seg(gt, c.start - .05, c.start + .15), 1 - seg(gt, c.end, c.end + .15));
+  X.save(); X.globalAlpha = a;
+  X.font = `500 40px ${SANS}`;
+  const tw = X.measureText(c.text).width;
+  const y = H - 92;
+  const g = X.createLinearGradient(0, y - 60, 0, H); g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,.55)");
+  X.fillStyle = g; X.fillRect(W / 2 - tw / 2 - 200, y - 60, tw + 400, H - y + 60);
+  X.restore();
+  txt(c.text, W / 2, y, { w: 500, size: 40, c: "#ffffff", a, stroke: 6, strokeColor: "rgba(0,0,0,.75)", ls: 1 });
+}
+function grain(gt) {
+  const R = rng(Math.floor(gt * 30) + 1);
+  X.save(); X.globalAlpha = .035;
+  for (let i = 0; i < 260; i++) { X.fillStyle = R() < .5 ? "#fff" : "#000"; X.fillRect(R() * W, R() * H, 2, 2); }
+  X.restore();
+}
+window.renderAt = function (gt) {
+  X.setTransform(1, 0, 0, 1, 0, 0); X.globalAlpha = 1; X.globalCompositeOperation = "source-over"; X.filter = "none"; X.shadowBlur = 0;
+  X.fillStyle = "#000"; X.fillRect(0, 0, W, H);
+  const s = TL.scenes.find(s => gt >= s.start && gt < s.end) || TL.scenes[TL.scenes.length - 1];
+  const lt = gt - s.start, d = s.end - s.start;
+  X.save(); SCENES[s.id](lt, d); X.restore();
+  // dip to black at scene boundaries
+  const fadeIn = s.id === "s01" ? seg(lt, 0, 1.2) : seg(lt, 0, .45);
+  const fadeOut = s.id === "s10" ? 1 - seg(lt, d - 1.2, d) : 1 - seg(lt, d - .4, d);
+  const k = Math.min(fadeIn, fadeOut);
+  if (k < 1) { X.fillStyle = `rgba(0,0,0,${1 - k})`; X.fillRect(0, 0, W, H); }
+  subtitles(gt);
+  grain(gt);
+};
+window.ready = (async () => {
+  await loadImages();
+  const sample = document.documentElement.innerHTML + TL.cues.map(c => c.text).join("") + "0123456789,+";
+  const specs = [`900 40px "Noto Serif SC"`, `700 40px "Noto Serif SC"`, `400 40px "Noto Sans SC"`, `500 40px "Noto Sans SC"`, `700 40px "Noto Sans SC"`, `400 40px Inter`, `600 40px Inter`];
+  for (const sp of specs) await document.fonts.load(sp, sample);
+  await document.fonts.ready;
+  window.renderAt(0);
+  return true;
+})();
+// preview mode: ?t=12.3 renders a still; ?play plays in real time
+const qs = new URLSearchParams(location.search);
+window.ready.then(() => {
+  if (qs.has("t")) window.renderAt(parseFloat(qs.get("t")));
+  if (qs.has("play")) { const t0 = performance.now() - (parseFloat(qs.get("play")) || 0) * 1000; const loop = () => { window.renderAt((performance.now() - t0) / 1000 % TL.total); requestAnimationFrame(loop); }; loop(); }
+});
+</script>
+</body>
+</html>

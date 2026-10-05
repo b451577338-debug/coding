@@ -1,0 +1,7 @@
+node_modules/
+chunk*
+*.log
+music.wav
+voice.wav
+mix.wav
+audio/

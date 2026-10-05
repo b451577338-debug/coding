@@ -1,0 +1,62 @@
+{
+ "hegemann.jpg": {
+  "title": "File:Peter Hegemann.jpg",
+  "artist": "Millencolin",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Peter_Hegemann.jpg"
+ },
+ "nagel.png": {
+  "title": "File:Prof. Dr. Georg Nagel.png",
+  "artist": "Millencolin",
+  "license": "CC0",
+  "page": "https://commons.wikimedia.org/wiki/File:Prof._Dr._Georg_Nagel.png"
+ },
+ "deisseroth.jpg": {
+  "title": "File:Karl Deisseroth in 2025.jpg",
+  "artist": "Cmichel67",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Karl_Deisseroth_in_2025.jpg"
+ },
+ "chlamy_lm.jpg": {
+  "title": "File:Chlamydomonas6-1.jpg",
+  "artist": "Dartmouth Electron Microscope Facility, Dartmouth College",
+  "license": "Public domain",
+  "page": "https://commons.wikimedia.org/wiki/File:Chlamydomonas6-1.jpg"
+ },
+ "chlamy_tem.jpg": {
+  "title": "File:Chlamydomonas TEM 01.jpg",
+  "artist": "Dartmouth Electron Microscope Facility, Dartmouth College",
+  "license": "Public domain",
+  "page": "https://commons.wikimedia.org/wiki/File:Chlamydomonas_TEM_01.jpg"
+ },
+ "brainbow.jpg": {
+  "title": "File:Brainbow (Smith 2007).jpg",
+  "artist": "Stephen J Smith",
+  "license": "CC BY 3.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Brainbow_(Smith_2007).jpg"
+ },
+ "gfp_neurons.png": {
+  "title": "File:GFP Neurons.png",
+  "artist": "ManuelSchottdorf",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:GFP_Neurons.png"
+ },
+ "opto_rig.jpg": {
+  "title": "File:Optogenetics imetronic.JPG",
+  "artist": "Bd008",
+  "license": "CC BY-SA 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Optogenetics_imetronic.JPG"
+ },
+ "pyramidal.jpg": {
+  "title": "File:Pyramidal hippocampal neuron 40x.jpg",
+  "artist": "MethoxyRoxy",
+  "license": "CC BY-SA 2.5",
+  "page": "https://commons.wikimedia.org/wiki/File:Pyramidal_hippocampal_neuron_40x.jpg"
+ },
+ "hippo_stained.jpg": {
+  "title": "File:Hippocampal Neurons, stained.jpg",
+  "artist": "Ns takes photos",
+  "license": "CC BY 4.0",
+  "page": "https://commons.wikimedia.org/wiki/File:Hippocampal_Neurons,_stained.jpg"
+ }
+}
